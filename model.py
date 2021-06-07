@@ -79,7 +79,7 @@ class SCG(torch.nn.Module):
         def reparameterize(self, mu, std):
                 z = mu
                 if self.training:
-                        std = torch.exp(std / 2)
+                        std = torch.exp(std/2)
                         eps = torch.randn_like(std)
                         z = mu + std*eps
                 return z
