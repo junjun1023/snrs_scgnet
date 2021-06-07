@@ -12,6 +12,8 @@ class SCG(torch.nn.Module):
                 self.add_diag = add_diag
                 self.dropout = dropout
 
+                self.sigmoid = torch.nn.Sigmoid()
+
                 # 1. reduce spatial size
                 self.pooling = torch.nn.AdaptiveAvgPool2d(node_size)
 
@@ -22,7 +24,7 @@ class SCG(torch.nn.Module):
                 )
 
                 self.log_var = torch.nn.Sequential(
-                        torch.nn.Conv2d(in_channels=in_ch, out_channels=hidden_ch, kernel_size=1, padding=1),
+                        torch.nn.Conv2d(in_channels=in_ch, out_channels=hidden_ch, kernel_size=1, padding=0),
                         torch.nn.Dropout(dropout),
                 )
 
@@ -45,7 +47,7 @@ class SCG(torch.nn.Module):
 
                 # inner product to get adjacency matrix, and pass relu to restrict value of A at [0, 1]
                 A = torch.matmul(z, z.permute(0, 2, 1))
-                A = torch.relu(A)       # why relu instead of Sigmoid?
+                A = self.sigmoid(A)       # why relu instead of Sigmoid?
 
                 # compute adaptive factor gamma
                 Ad = torch.diagonal(A, dim1=1, dim2=2)
@@ -55,7 +57,12 @@ class SCG(torch.nn.Module):
                 # compute diagonal loss
                 dl_loss = - gamma * torch.log(Ad+ 1.e-7).sum() / (A.size(0) * A.size(1) * A.size(2))
 
-                A = A + gamma * torch.diag_embed(A)
+                A_diag = []
+                for i in range(B):
+                        # iterate each batch to get diagonal
+                        A_diag.append(torch.diagflat(Ad[i]))
+                
+                A = A + gamma * torch.stack(A_diag)
                 A = self.laplacian_matrix(A, self_loop=True)
 
                 z_hat = mu.reshape(B, self.nodes, self.hidden_ch) * (1. - log_var.reshape(B, self.nodes, self.hidden_ch))
@@ -63,16 +70,16 @@ class SCG(torch.nn.Module):
 
                 # instrad of passing embedding z to gnn, pass the spatial reduced feature map as node features
                 # VAE is the part to obtain adjacency matrix
-                loss = kl_loss + dl_loss
+                # loss = kl_loss + dl_loss
 
-                return A, z, z_hat, loss
+                return A, z, z_hat, kl_loss, dl_loss
 
 
 
         def reparameterize(self, mu, std):
-                z = z
+                z = mu
                 if self.training:
-                        std = torch.exp(log_var / 2)
+                        std = torch.exp(std / 2)
                         eps = torch.randn_like(std)
                         z = mu + std*eps
                 return z
@@ -139,24 +146,28 @@ class BatchNorm_GCN(torch.nn.BatchNorm1d):
 
 
 class SCGDecoder(torch.nn.Module):
-        def __init__(self, encoder, decoder):
+        def __init__(self, encoder, decoder, activation=None):
                 super(SCGDecoder, self).__init__()
                 self.encoder = SCG(2112, 1, (32, 32))
-                self.decoder = torch.nn.Sequential(
-                        GCN_Layer(2112, 512, bnorm=True, activation=torch.nn.ReLU(True), dropout=0.2),
-                        GCN_Layer(512, 1, bnorm=False, activation=None)
-                )
-
+                self.gcn_1 = GCN_Layer(2112, 512, bnorm=True, activation=torch.nn.ReLU(inplace=False), dropout=0.2)
+                self.gcn_2 = GCN_Layer(512, 1, bnorm=False, activation=None)
+                
+                self.activation = activation
 
         def forward(self, features):
                 B, C, H, W = features.size()
-                A, z, z_hat, scg_loss = self.encoder(features)
+                A, z, z_hat, kl_loss, dl_loss = self.encoder(features)
 
-                features, _ = self.decoder(features, A)
+                # print(features.size(), A.size())
+                features, A = self.gcn_1([features.reshape(B, -1, C), A])
+                features, _ = self.gcn_2([features, A])
                 features += z_hat
 
-                features = torch.nn.functional.interpolate(features, (H, W), mode='bilinear')
-                return features, scg_loss
+                features = features.reshape(B, 1, H, W)
+                features = torch.nn.functional.interpolate(features, (512, 512), mode='bilinear', align_corners=False)
+                if self.activation:
+                        features = self.activation(features)
+                return features, kl_loss, dl_loss
 
 
 class SCGNet(torch.nn.Module):
@@ -166,6 +177,6 @@ class SCGNet(torch.nn.Module):
                 self.decoder = decoder
         
         def forward(self, x):
-                x = self.encoder(x)
-                x, scg_loss = self.decoder(x)
-                return x, scg_loss
+                x = self.encoder(x)[-2]
+                x, kl_loss, dl_loss = self.decoder(x)
+                return x, kl_loss, dl_loss
