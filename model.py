@@ -13,6 +13,7 @@ class SCG(torch.nn.Module):
                 self.dropout = dropout
 
                 self.sigmoid = torch.nn.Sigmoid()
+                self.relu = torch.nn.ReLU(inplace=False)
 
                 # 1. reduce spatial size
                 self.pooling = torch.nn.AdaptiveAvgPool2d(node_size)
@@ -38,6 +39,7 @@ class SCG(torch.nn.Module):
                 mu, log_var = self.mu(nodes), self.log_var(nodes)
                 z = self.reparameterize(mu, log_var)
                 z = z.reshape(B, self.nodes, self.hidden_ch)
+                # print(torch.min(z), torch.max(z))
 
                 # compute kl loss of VAE
                 # KLD = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
@@ -47,7 +49,10 @@ class SCG(torch.nn.Module):
 
                 # inner product to get adjacency matrix, and pass relu to restrict value of A at [0, 1]
                 A = torch.matmul(z, z.permute(0, 2, 1))
-                A = self.sigmoid(A)       # why relu instead of Sigmoid?
+                A = self.relu(A)       # why relu instead of Sigmoid?
+                # A = self.sigmoid(A)
+
+                # print(torch.min(A), torch.max(A))
 
                 # compute adaptive factor gamma
                 Ad = torch.diagonal(A, dim1=1, dim2=2)
@@ -123,13 +128,13 @@ class GCN_Layer(torch.nn.Module):
 def weight_xavier_init(*models):
         for model in models:
                 for module in model.modules():
-                        if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.Linear):
                                 # nn.init.xavier_normal_(module.weight)
-                                nn.init.orthogonal_(module.weight)
+                                torch.nn.init.orthogonal_(module.weight)
                                 # nn.init.kaiming_normal_(module.weight)
                                 if module.bias is not None:
                                         module.bias.data.zero_()
-                        elif isinstance(module, nn.BatchNorm2d):
+                        elif isinstance(module, torch.nn.BatchNorm2d):
                                 module.weight.data.fill_(1)
                                 module.bias.data.zero_()
 
@@ -161,7 +166,9 @@ class SCGDecoder(torch.nn.Module):
                 # print(features.size(), A.size())
                 features, A = self.gcn_1([features.reshape(B, -1, C), A])
                 features, _ = self.gcn_2([features, A])
+                # print(torch.where(features == 0))
                 features += z_hat
+                # features += 1e-7
 
                 features = features.reshape(B, 1, H, W)
                 features = torch.nn.functional.interpolate(features, (512, 512), mode='bilinear', align_corners=False)
@@ -175,6 +182,8 @@ class SCGNet(torch.nn.Module):
                 super(SCGNet, self).__init__()
                 self.encoder = encoder
                 self.decoder = decoder
+
+                weight_xavier_init(self.encoder, self.decoder)
         
         def forward(self, x):
                 x = self.encoder(x)[-2]
