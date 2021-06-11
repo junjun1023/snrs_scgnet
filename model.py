@@ -183,7 +183,7 @@ class SCGNet(torch.nn.Module):
                 self.encoder = encoder
                 self.decoder = decoder
 
-                weight_xavier_init(self.encoder, self.decoder)
+                # weight_xavier_init(self.encoder, self.decoder)
         
         def forward(self, x):
                 x = self.encoder(x)[-2]
