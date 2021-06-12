@@ -153,7 +153,7 @@ class BatchNorm_GCN(torch.nn.BatchNorm1d):
 class SCGDecoder(torch.nn.Module):
         def __init__(self, encoder, decoder, activation=None):
                 super(SCGDecoder, self).__init__()
-                self.encoder = SCG(2112, 1, (32, 32))
+                self.encoder = SCG(2112, 32, (32, 32))
                 self.gcn_1 = GCN_Layer(2112, 512, bnorm=True, activation=torch.nn.ReLU(inplace=False), dropout=0.2)
                 self.gcn_2 = GCN_Layer(512, 1, bnorm=False, activation=None)
                 
@@ -167,7 +167,7 @@ class SCGDecoder(torch.nn.Module):
                 features, A = self.gcn_1([features.reshape(B, -1, C), A])
                 features, _ = self.gcn_2([features, A])
                 # print(torch.where(features == 0))
-                features += z_hat
+                # features += z_hat
                 # features += 1e-7
 
                 features = features.reshape(B, 1, H, W)
