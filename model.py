@@ -203,10 +203,11 @@ class GCNBlock(torch.nn.Module):
                 feature = feature.reshape(B, -1, H, W)
                 if self.scale_size:
                         feature = torch.nn.functional.interpolate(feature, self.scale_size, mode='bilinear', align_corners=False)
-                        # A =  torch.nn.functional.interpolate(A, self.scale_size, mode='bilinear', align_corners=False)
+                        # scale_factor = (self.scale_size[0]/H, self.scale_size[1]/W)
+                        # A =  torch.nn.functional.interpolate(A, scale_factor=scale_factor, mode='bilinear', align_corners=False)
                 elif self.scale_factor:
                         feature = torch.nn.functional.interpolate(feature, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
-                        # A = torch.nn.functional.interpolate(A, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
+                        A = torch.nn.functional.interpolate(A, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
 
                 if self.activation:
                         feature = self.activation(feature)
@@ -217,22 +218,24 @@ class GCNBlock(torch.nn.Module):
 class SCGraphUnetDecoder(torch.nn.Module):
         def __init__(self, node_sizes, in_channels, out_channels, device):
                 super(SCGraphUnetDecoder, self).__init__()
-                self.encoders = [
+                self.encoders = torch.nn.ModuleList([
                         SCG(96, 1, (32, 32)).to(device),
                         SCG(384, 1, (32, 32)).to(device),
                         SCG(768, 1, (32, 32)).to(device),
                         SCG(2112, 1, (32, 32)).to(device),
                         # SCG(2208, 1, (16, 16)).to(device)
-                ]
+                ])
                 # for node_size, in_ch, out_ch in zip(node_sizes, in_channels, out_channels):
                 #         self.encoders.append(SCG(in_ch, node_size, out_ch))
-                self.decoders = [
+                self.decoders = torch.nn.ModuleList([
                         GCNBlock(in_ch=96, hidden_ch=64, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
                         GCNBlock(in_ch=384, hidden_ch=128, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
                         GCNBlock(in_ch=768, hidden_ch=256, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
                         GCNBlock(in_ch=2112, hidden_ch=512, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
                         # GCNBlock(in_ch=2208, hidden_ch=1024, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
-                ]
+                ])
+
+                self.conv1 =  torch.nn.Conv2d(in_channels=4, out_channels=1, kernel_size=1, padding=0)
 
         def forward(self, features):
                 features = features[1:-1]
@@ -256,12 +259,14 @@ class SCGraphUnetDecoder(torch.nn.Module):
                         else:
                                 feats = feat
 
-                B, C, H, W = feats.size()
-                feat = torch.mean(feats.view(B, H, W, C), -1)
-                feat = feat.unsqueeze(1)
-                feat = torch.nn.Sigmoid()(feat)
+                # B, C, H, W = feats.size()
+                # feat = torch.mean(feats.view(B, H, W, C), -1)
 
-                return feat, torch.mean(torch.stack(kl_losses)), torch.mean(torch.stack(dl_losses))
+                feats = self.conv1(feats)
+                # feat = feat.unsqueeze(1)
+                feats = torch.nn.Sigmoid()(feats)
+
+                return feats, torch.mean(torch.stack(kl_losses)), torch.mean(torch.stack(dl_losses))
 
 
 
