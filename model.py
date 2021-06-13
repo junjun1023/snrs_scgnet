@@ -195,12 +195,14 @@ class GCNBlock(torch.nn.Module):
                 self.activation = activation
                 
         def forward(self, feature):
-                feature, A = feature
+                feature, A, residual = feature
                 B, C, H, W = feature.size()
                 feature = self.gcn_1([feature.reshape(B, -1, C), A])
                 feature, A = self.gcn_2(feature)
 
                 feature = feature.reshape(B, -1, H, W)
+                residual = residual.reshape(B, -1, H, W)
+                feature += residual
                 if self.scale_size:
                         feature = torch.nn.functional.interpolate(feature, self.scale_size, mode='bilinear', align_corners=False)
                         # scale_factor = (self.scale_size[0]/H, self.scale_size[1]/W)
@@ -246,11 +248,11 @@ class SCGraphUnetDecoder(torch.nn.Module):
 
                 feats = None
                 for feature, encoder, decoder in zip(features, self.encoders, self.decoders):
-                        A, z, _, kl_loss, dl_loss = encoder(feature)
+                        A, z, z_hat, kl_loss, dl_loss = encoder(feature)
                   
                         B, C, H, W = z.size()
-                        feat = decoder([z, A])
-
+                        feat = decoder([z, A, z_hat])
+                        # feat += z_hat
                         kl_losses.append(kl_loss)
                         dl_losses.append(dl_loss)
 
