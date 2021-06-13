@@ -104,10 +104,10 @@ class SCG(torch.nn.Module):
 
                 return LA
         
-class GCN_Layer(torch.nn.Module):
+class GCNLayer(torch.nn.Module):
         def __init__(self, in_features, out_features, bnorm=True,
                         activation=torch.nn.ReLU(), dropout=None):
-                super(GCN_Layer, self).__init__()
+                super(GCNLayer, self).__init__()
                 self.bnorm = bnorm
                 fc = [torch.nn.Linear(in_features, out_features)]
                 if bnorm:
@@ -151,12 +151,14 @@ class BatchNorm_GCN(torch.nn.BatchNorm1d):
 
 
 class SCGDecoder(torch.nn.Module):
-        def __init__(self, encoder, decoder, activation=None):
+        def __init__(self, encoder, decoder, activation=None, scale_size=None, scale_factor=None):
                 super(SCGDecoder, self).__init__()
-                self.encoder = SCG(2112, 32, (32, 32))
-                self.gcn_1 = GCN_Layer(2112, 512, bnorm=True, activation=torch.nn.ReLU(inplace=False), dropout=0.2)
-                self.gcn_2 = GCN_Layer(512, 1, bnorm=False, activation=None)
+                self.encoder = SCG(2112, 1, (32, 32))
+                self.gcn_1 = GCNLayer(2112, 512, bnorm=True, activation=torch.nn.ReLU(inplace=False), dropout=0.2)
+                self.gcn_2 = GCNLayer(512, 1, bnorm=False, activation=None)
                 
+                self.scale_size = scale_size
+                self.scale_factor = scale_factor
                 self.activation = activation
 
         def forward(self, features):
@@ -167,14 +169,111 @@ class SCGDecoder(torch.nn.Module):
                 features, A = self.gcn_1([features.reshape(B, -1, C), A])
                 features, _ = self.gcn_2([features, A])
                 # print(torch.where(features == 0))
-                # features += z_hat
+                features += z_hat
                 # features += 1e-7
 
                 features = features.reshape(B, 1, H, W)
-                features = torch.nn.functional.interpolate(features, (512, 512), mode='bilinear', align_corners=False)
+                if self.scale_size:
+                        features = torch.nn.functional.interpolate(features, self.scale_size, mode='bilinear', align_corners=False)
+                elif self.scale_factor:
+                        features = torch.nn.functional.interpolate(features, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
+                
                 if self.activation:
                         features = self.activation(features)
                 return features, kl_loss, dl_loss
+
+
+
+
+class GCNBlock(torch.nn.Module):
+        def __init__(self, in_ch, hidden_ch, out_ch, scale_size=None, scale_factor=None, activation=None, dropout=None):
+                super(GCNBlock, self).__init__()
+                self.gcn_1 = GCNLayer(in_ch, hidden_ch, bnorm=True, activation=activation, dropout=dropout)
+                self.gcn_2 = GCNLayer(hidden_ch, out_ch, bnorm=False, activation=None)
+
+                self.scale_size = scale_size
+                self.scale_factor = scale_factor
+                self.activation = activation
+                
+        def forward(self, feature):
+                B, C, H, W = feature[0].size()
+                feature = self.gcn_1(feature)
+                feature, A = self.gcn_2(feature)
+
+                feature = feature.reshape(B, 1, H, W)
+                if self.scale_size:
+                        feature = torch.nn.functional.interpolate(feature, self.scale_size, mode='bilinear', align_corners=False)
+                        A =  torch.nn.functional.interpolate(A, self.scale_size, mode='bilinear', align_corners=False)
+                elif self.scale_factor:
+                        feature = torch.nn.functional.interpolate(feature, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
+                        A = torch.nn.functional.interpolate(A, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
+
+                if self.activation:
+                        feature = self.activation(feature)
+
+                return feature
+
+
+class SCGraphUnetDecoder(torch.nn.Module):
+        def __init__(self, node_sizes, in_channels, out_channels, device):
+                super(SCGraphUnetDecoder, self).__init__()
+                self.encoders = [
+                        SCG(96, 1, (256, 256)).to(device),
+                        SCG(384, 1, (128, 128)).to(device),
+                        SCG(768, 1, (64, 64)).to(device),
+                        SCG(2112, 1, (32, 32)).to(device),
+                        SCG(2208, 1, (16, 16)).to(device)
+                ]
+                # for node_size, in_ch, out_ch in zip(node_sizes, in_channels, out_channels):
+                #         self.encoders.append(SCG(in_ch, node_size, out_ch))
+                self.decoders = [
+                        GCNBlock(in_ch=96, hidden_ch=64, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
+                        GCNBlock(in_ch=384, hidden_ch=128, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
+                        GCNBlock(in_ch=768, hidden_ch=256, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
+                        GCNBlock(in_ch=2112, hidden_ch=512, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
+                        GCNBlock(in_ch=2208, hidden_ch=1024, out_ch=1, scale_size=(512, 512), dropout=0.2).to(device),
+                ]
+
+        def forward(self, features):
+                features = features[1:]
+                assert len(features) == len(self.encoders), "Length of input must be equal to encoders"
+
+                kl_losses, dl_losses = [], []
+
+                feats = None
+                for feature, encoder, decoder in zip(features, self.encoders, self.decoders):
+                        A, _, _, kl_loss, dl_loss = encoder(feature)
+                        B, C, H, W = feature.size()
+                        feat = decoder(feature.reshape(B, -1, C), A)
+                        kl_losses.append(kl_loss)
+                        dl_losses.append(dl_loss)
+                        if feats:
+                                feats = torch.stack((feats, feat))
+                        else:
+                                feats = feat
+
+                B, C, H, W = feats.size()
+                feat = torch.mean(feats.view(B, H, W, C), -1)
+                feat = feat.unsqueeze(1)
+                feat = torch.nn.Sigmoid()(feat)
+
+                return pred, torch.mean(kl_losses), torch.mean(dl_losses)
+
+
+
+class SCGraphUnet(torch.nn.Module):
+        def __init__(self, encoder, decoder):
+                super(SCGraphUnet, self).__init__()
+                self.encoder = encoder
+                self.decoder = decoder
+
+                # weight_xavier_init(self.encoder, self.decoder)
+        
+        def forward(self, x):
+                x = self.encoder(x)
+                x, kl_loss, dl_loss = self.decoder(x)
+                return x, kl_loss, dl_loss
+
 
 
 class SCGNet(torch.nn.Module):
@@ -189,3 +288,6 @@ class SCGNet(torch.nn.Module):
                 x = self.encoder(x)[-2]
                 x, kl_loss, dl_loss = self.decoder(x)
                 return x, kl_loss, dl_loss
+
+
+
