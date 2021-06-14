@@ -221,9 +221,9 @@ class SCGraphUnetDecoder(torch.nn.Module):
         def __init__(self, node_sizes, in_channels, out_channels, device):
                 super(SCGraphUnetDecoder, self).__init__()
                 self.encoders = torch.nn.ModuleList([
-                        SCG(96, 1, (32, 32)).to(device),
-                        SCG(384, 1, (32, 32)).to(device),
-                        SCG(768, 1, (32, 32)).to(device),
+                        SCG(96, 1, (128, 128)).to(device),
+                        SCG(384, 1, (64, 64)).to(device),
+                        SCG(768, 1, (64, 64)).to(device),
                         SCG(2112, 1, (32, 32)).to(device),
                         # SCG(2208, 1, (16, 16)).to(device)
                 ])
